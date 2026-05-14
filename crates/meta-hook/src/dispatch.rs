@@ -35,7 +35,15 @@ pub fn run_hook(hook: &HookCommand, cwd: &Path, envelope_json: &str) -> anyhow::
 
     let mut spawned = child.spawn()?;
     if let Some(mut stdin) = spawned.stdin.take() {
-        stdin.write_all(envelope_json.as_bytes())?;
+        // Tolerate BrokenPipe: a fast-exiting hook (e.g. `exit 7`) closes
+        // its stdin before we finish writing, which is racy and surfaces
+        // on slow runners (notably ubuntu-24.04-arm). The exit code is
+        // still meaningful regardless of whether the envelope landed.
+        if let Err(e) = stdin.write_all(envelope_json.as_bytes()) {
+            if e.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(e.into());
+            }
+        }
         // Drop closes stdin.
     }
     let status = spawned.wait()?;
