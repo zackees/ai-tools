@@ -9,9 +9,19 @@ homepage.workspace = true
 authors.workspace = true
 description = "Native Rust hook delegator for Claude Code and Codex sub-repos"
 
-[dependencies]
-clap = { version = "4", features = ["derive"] }
+[lib]
+name = "meta_hook"
+path = "src/lib.rs"
 
 [[bin]]
 name = "meta-hook"
 path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"
