@@ -1,5 +1,7 @@
 # ai-tools
 
+[![CI](https://github.com/zackees/ai-tools/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/zackees/ai-tools/actions/workflows/ci.yml)
+
 Native Rust binaries that fill in the rough edges of Claude Code and Codex.
 
 The first (and currently only) binary is **`meta-hook`** — a hook delegator

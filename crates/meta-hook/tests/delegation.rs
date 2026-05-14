@@ -10,33 +10,15 @@
 //! and runs `meta-hook --pre-tool` (etc.) against envelopes pointing into
 //! that tree.
 
+mod common;
+
+use common::meta_hook_bin;
 use serde_json::json;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempfile::tempdir;
-
-/// Locate the freshly-built `meta-hook` binary.
-///
-/// Uses `CARGO_BIN_EXE_meta-hook` when running under `cargo test`; falls
-/// back to `target/debug/meta-hook` otherwise.
-fn meta_hook_bin() -> PathBuf {
-    if let Some(p) = option_env!("CARGO_BIN_EXE_meta-hook") {
-        return PathBuf::from(p);
-    }
-    let exe = if cfg!(windows) {
-        "meta-hook.exe"
-    } else {
-        "meta-hook"
-    };
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("target")
-        .join("debug")
-        .join(exe)
-}
 
 /// Build the fixture tree and return `(workspace, project_a, project_b, shared_file)`.
 fn build_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
