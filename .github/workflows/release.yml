@@ -1,0 +1,217 @@
+# Release pipeline: tag push -> per-target binary build -> single GitHub Release.
+#
+# Trigger contract: pushing a tag matching `v*` (e.g. `v0.1.0`) kicks off
+# six parallel cross-target builds, then a single publish job that gathers
+# all artifacts and creates one Release for the tag.
+#
+# Hardening:
+#   * Build jobs run with `permissions: contents: read`. Only the publish
+#     job gets `contents: write` — the bare minimum to attach assets.
+#   * The publish job hard-fails if a release already exists for the tag.
+#     This means re-running the workflow on an already-published tag will
+#     not silently overwrite assets. Combined with the tag-protection
+#     ruleset (no force-update, no deletion) this gives write-once tags
+#     AND write-once releases.
+#   * Third-party action `softprops/action-gh-release` is pinned by full
+#     commit SHA. `actions/checkout`, `actions/upload-artifact`,
+#     `actions/download-artifact`, and `zackees/setup-soldr` are pinned
+#     by major version per the issue spec.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            archive: tar.gz
+            strip: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            archive: tar.gz
+            strip: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-2025
+            archive: zip
+            strip: false
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            archive: zip
+            strip: false
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            archive: tar.gz
+            strip: true
+          - target: aarch64-apple-darwin
+            os: macos-15
+            archive: tar.gz
+            strip: true
+    env:
+      RUST_BACKTRACE: "1"
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+
+      - name: Setup soldr
+        uses: zackees/setup-soldr@8bc6da394b8ad370654826a0b3d8f5e3615d10d6 # v0 (pre-Node20-rewrite)
+        with:
+          toolchain: "1.94.1"
+          version: "0.7.11"
+          cache: true
+          build-cache-mode: thin
+          target: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: soldr cargo build --release --bin meta-hook --target ${{ matrix.target }}
+
+      - name: Resolve version + paths
+        id: vars
+        shell: bash
+        run: |
+          ref="${GITHUB_REF##*/}"
+          version="${ref#v}"
+          stem="meta-hook-v${version}-${{ matrix.target }}"
+          bin="meta-hook"
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            bin="meta-hook.exe"
+          fi
+          echo "version=$version"   >> "$GITHUB_OUTPUT"
+          echo "stem=$stem"         >> "$GITHUB_OUTPUT"
+          echo "bin_name=$bin"      >> "$GITHUB_OUTPUT"
+          echo "bin_path=target/${{ matrix.target }}/release/$bin" >> "$GITHUB_OUTPUT"
+
+      - name: Strip binary
+        if: ${{ matrix.strip }}
+        shell: bash
+        run: |
+          # Linux-cross strip lives under the target's binutils; macOS strip
+          # is just `strip`. Both are present on the GH runners we use.
+          if command -v "${{ matrix.target }}-strip" >/dev/null 2>&1; then
+            "${{ matrix.target }}-strip" "${{ steps.vars.outputs.bin_path }}"
+          else
+            strip "${{ steps.vars.outputs.bin_path }}"
+          fi
+
+      - name: Stage artifact
+        id: stage
+        shell: bash
+        run: |
+          stem="${{ steps.vars.outputs.stem }}"
+          stage="dist/$stem"
+          mkdir -p "$stage"
+          cp "${{ steps.vars.outputs.bin_path }}" "$stage/${{ steps.vars.outputs.bin_name }}"
+          cp LICENSE "$stage/LICENSE"
+          cp README.md "$stage/README.md"
+          cd dist
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            archive="$stem.zip"
+            if command -v 7z >/dev/null 2>&1; then
+              7z a "$archive" "$stem" >/dev/null
+            else
+              powershell -Command "Compress-Archive -Path '$stem' -DestinationPath '$archive'"
+            fi
+          else
+            archive="$stem.tar.gz"
+            tar -czf "$archive" "$stem"
+          fi
+          # SHA256 sidecar — sha256sum on Linux, shasum on macOS, certutil on Windows-bash.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$archive" > "$archive.sha256"
+          elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$archive" > "$archive.sha256"
+          else
+            # Fallback: use python (present on all GH runners).
+            python -c "import hashlib,sys; p=sys.argv[1]; print(hashlib.sha256(open(p,'rb').read()).hexdigest()+'  '+p)" \
+              "$archive" > "$archive.sha256"
+          fi
+          echo "archive=dist/$archive"        >> "$GITHUB_OUTPUT"
+          echo "checksum=dist/$archive.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.vars.outputs.stem }}
+          path: |
+            ${{ steps.stage.outputs.archive }}
+            ${{ steps.stage.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          tag="${GITHUB_REF##*/}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # Hard-fail if a release already exists for this tag. Combined with
+      # the tag-protection ruleset (no force-update on `refs/tags/v*`),
+      # this enforces "tags + releases are write-once."
+      - name: Guard against republish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -e
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists. Bump the version and tag a new release; tags + releases are write-once."
+            exit 1
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Stage release assets
+        id: stage
+        run: |
+          mkdir -p release
+          # Each artifact is a directory; flatten archive + sha256 into release/.
+          find dist -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.sha256" \) -print0 \
+            | xargs -0 -I{} cp {} release/
+          ls -la release
+
+      - name: Publish GitHub Release
+        # softprops/action-gh-release v3.0.0 — pinned by full commit SHA.
+        # Build jobs are still read-only; only this job has `contents: write`.
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          draft: false
+          prerelease: false
+          make_latest: "true"
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release/*.tar.gz
+            release/*.zip
+            release/*.sha256

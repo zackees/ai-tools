@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/meta-hook",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "BSD-3-Clause"
+repository = "https://github.com/zackees/ai-tools"
+homepage = "https://github.com/zackees/ai-tools"
+authors = ["Zachary Vorhies"]
+
+[profile.release]
+debug = "line-tables-only"
+split-debuginfo = "packed"
+strip = "none"
+lto = "thin"

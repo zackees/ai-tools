@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Run all Rust tests in the workspace via soldr.
+#
+# Extra args are forwarded to `cargo test`, so:
+#   bash test                          # full workspace test run
+#   bash test -p meta-hook -- mode_of  # filter to a single test
+
+set -euo pipefail
+
+# shellcheck source=./env.sh
+source "$(dirname "$0")/env.sh"
+
+soldr cargo test --all "$@"

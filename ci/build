@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Build the meta-hook release binary via soldr.
+#
+# Extra args are forwarded to `cargo build`, so:
+#   bash build                     # release build of meta-hook
+#   bash build --target x86_64-... # cross-target release build
+
+set -euo pipefail
+
+# shellcheck source=./env.sh
+source "$(dirname "$0")/env.sh"
+
+soldr cargo build --release --bin meta-hook "$@"

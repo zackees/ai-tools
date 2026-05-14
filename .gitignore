@@ -1,0 +1,26 @@
+# Rust
+/target/
+**/*.rs.bk
+# Note: Cargo.lock IS committed for this binary workspace.
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+.tmp/
+*.log
+
+# Build / release staging
+dist/
+release/

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# fmt-check + clippy under -D warnings, via soldr.
+#
+# Mirrors the CI lint job exactly so `bash lint` reproduces what runs on
+# every push.
+
+set -euo pipefail
+
+# shellcheck source=./env.sh
+source "$(dirname "$0")/env.sh"
+
+echo "==> cargo fmt --check"
+soldr cargo fmt --all -- --check
+
+echo "==> cargo clippy --all-targets -- -D warnings"
+soldr cargo clippy --all-targets --all-features -- -D warnings
