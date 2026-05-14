@@ -1,8 +1,10 @@
 # Release pipeline: tag push -> per-target binary build -> single GitHub Release.
 #
 # Trigger contract: pushing a tag matching `v*` (e.g. `v0.1.0`) kicks off
-# six parallel cross-target builds, then a single publish job that gathers
-# all artifacts and creates one Release for the tag.
+# eight parallel cross-target builds (six glibc/macOS/Windows + two
+# Linux musl variants for fully-static binaries usable on Alpine and
+# similar distros), then a single publish job that gathers all artifacts
+# and creates one Release for the tag.
 #
 # Hardening:
 #   * Build jobs run with `permissions: contents: read`. Only the publish
@@ -42,32 +44,64 @@ jobs:
             os: ubuntu-24.04
             archive: tar.gz
             strip: true
+            musl: false
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
             archive: tar.gz
             strip: true
+            musl: false
+          # musl targets: fully-static linux binaries (Alpine-compatible).
+          # x86_64-musl builds natively on ubuntu-24.04 with `musl-tools`.
+          # aarch64-musl builds natively on ubuntu-24.04-arm with the same
+          # apt-installed toolchain — picked the native-runner path over
+          # `cross` to keep CI dependency-free and consistent with the
+          # other Linux jobs.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+            archive: tar.gz
+            strip: true
+            musl: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            archive: tar.gz
+            strip: true
+            musl: true
           - target: x86_64-pc-windows-msvc
             os: windows-2025
             archive: zip
             strip: false
+            musl: false
           - target: aarch64-pc-windows-msvc
             os: windows-11-arm
             archive: zip
             strip: false
+            musl: false
           - target: x86_64-apple-darwin
             os: macos-15-intel
             archive: tar.gz
             strip: true
+            musl: false
           - target: aarch64-apple-darwin
             os: macos-15
             archive: tar.gz
             strip: true
+            musl: false
     env:
       RUST_BACKTRACE: "1"
       CARGO_TERM_COLOR: always
     steps:
       - name: Checkout tag
         uses: actions/checkout@v4
+
+      - name: Install musl toolchain
+        if: ${{ matrix.musl }}
+        shell: bash
+        run: |
+          # musl-tools brings musl-gcc; both x86_64 and aarch64 ubuntu
+          # runners ship the same package name and produce a native musl
+          # build for the runner's arch.
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
 
       - name: Setup soldr
         uses: zackees/setup-soldr@8bc6da394b8ad370654826a0b3d8f5e3615d10d6 # v0 (pre-Node20-rewrite)
@@ -79,6 +113,11 @@ jobs:
           target: ${{ matrix.target }}
 
       - name: Build release binary
+        env:
+          # For musl, force a fully-static crt so the binary works on
+          # Alpine and other libc-less / glibc-incompatible environments.
+          # No-op for non-musl targets.
+          RUSTFLAGS: ${{ matrix.musl && '-C target-feature=+crt-static' || '' }}
         run: soldr cargo build --release --bin meta-hook --target ${{ matrix.target }}
 
       - name: Resolve version + paths
