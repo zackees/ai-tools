@@ -6,8 +6,6 @@ The first (and currently only) binary is **`meta-hook`** — a hook delegator
 that lets Claude Code / Codex run the hooks belonging to a *nested* git
 sub-repo when a tool call touches a file inside it. See
 [issue #1](https://github.com/zackees/ai-tools/issues/1) for the design.
-The binary in this repo is a buildable scaffold today; the actual delegation
-logic is in flight.
 
 This repo is a Cargo workspace; sibling single-purpose hook binaries can be
 added under `crates/` later.
@@ -31,11 +29,17 @@ install meta-hook-v0.1.0-x86_64-unknown-linux-gnu/meta-hook ~/.local/bin/
 
 Supported targets:
 
-| OS       | x86_64                          | aarch64 / arm64                  |
-|----------|---------------------------------|----------------------------------|
-| Linux    | `x86_64-unknown-linux-gnu`      | `aarch64-unknown-linux-gnu`      |
-| macOS    | `x86_64-apple-darwin`           | `aarch64-apple-darwin`           |
-| Windows  | `x86_64-pc-windows-msvc`        | `aarch64-pc-windows-msvc`        |
+| OS              | x86_64                          | aarch64 / arm64                  |
+|-----------------|---------------------------------|----------------------------------|
+| Linux (glibc)   | `x86_64-unknown-linux-gnu`      | `aarch64-unknown-linux-gnu`      |
+| Linux (musl)    | `x86_64-unknown-linux-musl`     | `aarch64-unknown-linux-musl`     |
+| macOS           | `x86_64-apple-darwin`           | `aarch64-apple-darwin`           |
+| Windows         | `x86_64-pc-windows-msvc`        | `aarch64-pc-windows-msvc`        |
+
+The **musl** archives ship fully-statically-linked binaries that run on
+Alpine and other distributions without glibc — pick those if your host
+isn't a Debian/Ubuntu/Fedora-family system, or if you want a binary you
+can drop into a minimal container image with no shared-library dance.
 
 ### From source
 
@@ -103,12 +107,14 @@ git push --tags
 
 The `release.yml` workflow then:
 
-1. Cross-builds `meta-hook` for the six target triples listed above.
+1. Cross-builds `meta-hook` for the eight target triples listed above
+   (six glibc/macOS/Windows + two Linux musl variants).
 2. Strips the binary (where applicable).
 3. Packages each as `meta-hook-vX.Y.Z-<triple>.{tar.gz,zip}` with a
    SHA256 sidecar.
-4. Publishes a single GitHub Release with all 12 assets attached and
-   auto-generated release notes. `make_latest: true`, no draft.
+4. Publishes a single GitHub Release with all 16 assets (8 archives +
+   8 `.sha256` sidecars) attached and auto-generated release notes.
+   `make_latest: true`, no draft.
 
 ### Immutability rules
 
