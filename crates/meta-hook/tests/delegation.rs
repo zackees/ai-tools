@@ -106,12 +106,13 @@ fn run_meta_hook(args: &[&str], envelope: &str, workspace: &Path) -> (i32, Strin
         .stderr(Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn {}: {e}", bin.display()));
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(envelope.as_bytes())
-        .unwrap();
+    // Tolerate BrokenPipe: short-circuit modes (UserPrompt / Stop) exit
+    // before reading stdin, and on fast runners the write loses the race.
+    if let Err(e) = child.stdin.as_mut().unwrap().write_all(envelope.as_bytes()) {
+        if e.kind() != std::io::ErrorKind::BrokenPipe {
+            panic!("write to child stdin failed: {e}");
+        }
+    }
     let out = child.wait_with_output().unwrap();
     let code = out.status.code().unwrap_or(-1);
     (
