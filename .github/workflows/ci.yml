@@ -38,16 +38,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # zackees/setup-soldr@v0 is pinned to a specific SHA because the
-      # floating `v0` tag was rewritten to a Node20 TypeScript port that
-      # silently drops `components` from rust-toolchain.toml, leaving
-      # rustfmt/clippy missing. See zackees/setup-soldr#76. The clud repo
-      # adopted this exact pin for the same reason.
       - name: Setup soldr
-        uses: zackees/setup-soldr@8bc6da394b8ad370654826a0b3d8f5e3615d10d6 # v0 (pre-Node20-rewrite)
+        uses: zackees/setup-soldr@v0
         with:
           toolchain: "1.94.1"
-          version: "0.7.11"
+          version: "0.7.45"
           cache: true
           build-cache-mode: thin
 
