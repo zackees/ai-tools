@@ -102,6 +102,13 @@ jobs:
           version: "0.7.59"
           cache: true
           build-cache-mode: thin
+          # platform-default opts out of setup-soldr's `fast` linker
+          # override (mold/rust-lld). Cross-compile lanes need zigbuild's
+          # zig-cc toolchain to own the linker — otherwise SOLDR_LINKER
+          # injects rust-lld which defaults to the host arch (x86_64) and
+          # fails to link aarch64 object files. The xwin lane gets its
+          # MSVC linker config from soldr's cargo front door regardless.
+          linker: platform-default
 
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
@@ -129,7 +136,17 @@ jobs:
           sudo apt-get install -y --no-install-recommends llvm zip
 
       - name: Cross-compile release binary
-        run: soldr cargo ${{ matrix.tool }} --release --bin meta-hook --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # cargo-zigbuild accepts `cargo zigbuild --release ...` directly
+          # (zigbuild treats the absence of a subverb as `build`), but
+          # cargo-xwin requires the explicit `build` subverb before flags.
+          if [ "${{ matrix.tool }}" = "xwin" ]; then
+            soldr cargo xwin build --release --bin meta-hook --target "${{ matrix.target }}"
+          else
+            soldr cargo zigbuild --release --bin meta-hook --target "${{ matrix.target }}"
+          fi
 
       - name: Resolve version + paths
         id: vars
