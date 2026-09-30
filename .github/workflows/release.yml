@@ -1,23 +1,28 @@
-# Release pipeline: tag push -> per-target binary build -> single GitHub Release.
+# Release pipeline: tag push -> per-target cross-compile from a single
+# ubuntu-24.04 runner family -> single GitHub Release.
 #
-# Trigger contract: pushing a tag matching `v*` (e.g. `v0.1.0`) kicks off
-# eight parallel cross-target builds (six glibc/macOS/Windows + two
-# Linux musl variants for fully-static binaries usable on Alpine and
-# similar distros), then a single publish job that gathers all artifacts
-# and creates one Release for the tag.
+# Pattern: every target builds on linux-x86 using soldr's cargo front
+# door. zigbuild handles Linux/macOS targets; xwin handles Windows-MSVC.
+# Per-OS native runners are gone — same compiler, same flags, same
+# linker semantics across every artifact, and we pay the cheaper
+# linux-runner price tag for every job.
+#
+# Trigger contract:
+#   * push tag v*                              -> full build + publish
+#   * workflow_dispatch with dry-run: true     -> full build matrix, NO publish
+#   * workflow_dispatch with dry-run: false    -> full build + publish
 #
 # Hardening:
 #   * Build jobs run with `permissions: contents: read`. Only the publish
 #     job gets `contents: write` — the bare minimum to attach assets.
 #   * The publish job hard-fails if a release already exists for the tag.
-#     This means re-running the workflow on an already-published tag will
-#     not silently overwrite assets. Combined with the tag-protection
-#     ruleset (no force-update, no deletion) this gives write-once tags
-#     AND write-once releases.
-#   * Third-party action `softprops/action-gh-release` is pinned by full
-#     commit SHA. `actions/checkout`, `actions/upload-artifact`,
-#     `actions/download-artifact`, and `zackees/setup-soldr` are pinned
-#     by major version per the issue spec.
+#     Combined with the tag-protection ruleset, tags + releases are
+#     write-once.
+#   * Third-party `softprops/action-gh-release` pinned by full commit SHA.
+#     `actions/checkout`, `actions/upload-artifact`,
+#     `actions/download-artifact`, `zackees/setup-soldr`,
+#     `mlugg/setup-zig`, and `taiki-e/install-action` pinned by major
+#     version.
 
 name: Release
 
@@ -25,14 +30,25 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Build all targets but skip GitHub Release publish"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
+env:
+  RUST_BACKTRACE: "1"
+  CARGO_TERM_COLOR: always
+
 jobs:
   build:
     name: build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: read
@@ -41,91 +57,111 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-24.04
             archive: tar.gz
-            strip: true
-            musl: false
+            tool: zigbuild
+            cargo_tool_install: cargo-zigbuild
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
             archive: tar.gz
-            strip: true
-            musl: false
+            tool: zigbuild
+            cargo_tool_install: cargo-zigbuild
           # musl targets: fully-static linux binaries (Alpine-compatible).
-          # x86_64-musl builds natively on ubuntu-24.04 with `musl-tools`.
-          # aarch64-musl builds natively on ubuntu-24.04-arm with the same
-          # apt-installed toolchain — picked the native-runner path over
-          # `cross` to keep CI dependency-free and consistent with the
-          # other Linux jobs.
+          # zigbuild handles both glibc and musl in one toolchain; the
+          # old apt `musl-tools` install + per-host runner split is gone.
           - target: x86_64-unknown-linux-musl
-            os: ubuntu-24.04
             archive: tar.gz
-            strip: true
-            musl: true
+            tool: zigbuild
+            cargo_tool_install: cargo-zigbuild
           - target: aarch64-unknown-linux-musl
-            os: ubuntu-24.04-arm
             archive: tar.gz
-            strip: true
-            musl: true
+            tool: zigbuild
+            cargo_tool_install: cargo-zigbuild
           - target: x86_64-pc-windows-msvc
-            os: windows-2025
             archive: zip
-            strip: false
-            musl: false
+            tool: xwin
+            cargo_tool_install: cargo-xwin
           - target: aarch64-pc-windows-msvc
-            os: windows-11-arm
             archive: zip
-            strip: false
-            musl: false
+            tool: xwin
+            cargo_tool_install: cargo-xwin
           - target: x86_64-apple-darwin
-            os: macos-15-intel
             archive: tar.gz
-            strip: true
-            musl: false
+            tool: zigbuild
+            cargo_tool_install: cargo-zigbuild
           - target: aarch64-apple-darwin
-            os: macos-15
             archive: tar.gz
-            strip: true
-            musl: false
-    env:
-      RUST_BACKTRACE: "1"
-      CARGO_TERM_COLOR: always
+            tool: zigbuild
+            cargo_tool_install: cargo-zigbuild
     steps:
-      - name: Checkout tag
+      - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Install musl toolchain
-        if: ${{ matrix.musl }}
-        shell: bash
-        run: |
-          # musl-tools brings musl-gcc; both x86_64 and aarch64 ubuntu
-          # runners ship the same package name and produce a native musl
-          # build for the runner's arch.
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
 
       - name: Setup soldr
         uses: zackees/setup-soldr@v0.9.24
         with:
           toolchain: "1.94.1"
-          version: "0.7.45"
+          version: "0.7.59"
           cache: true
           build-cache-mode: thin
-          target: ${{ matrix.target }}
+          # platform-default opts out of setup-soldr's `fast` linker
+          # override (mold/rust-lld). Cross-compile lanes need zigbuild's
+          # zig-cc toolchain to own the linker — otherwise SOLDR_LINKER
+          # injects rust-lld which defaults to the host arch (x86_64) and
+          # fails to link aarch64 object files. The xwin lane gets its
+          # MSVC linker config from soldr's cargo front door regardless.
+          linker: platform-default
 
-      - name: Build release binary
-        env:
-          # For musl, force a fully-static crt so the binary works on
-          # Alpine and other libc-less / glibc-incompatible environments.
-          # No-op for non-musl targets.
-          RUSTFLAGS: ${{ matrix.musl && '-C target-feature=+crt-static' || '' }}
-        run: soldr cargo build --release --bin meta-hook --target ${{ matrix.target }}
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      # Pre-install cargo-zigbuild / cargo-xwin via taiki-e/install-action.
+      # Placing them on PATH up front lets soldr's cargo front door take
+      # its PATH-first deferral branch (avoids fanning out unauthenticated
+      # GitHub API calls across an 8-target matrix and getting 403'd).
+      - name: Install cross-compile cargo subcommand
+        uses: taiki-e/install-action@v2
+        with:
+          tool: ${{ matrix.cargo_tool_install }}
+
+      - name: Install zig (zigbuild lanes only)
+        if: matrix.tool == 'zigbuild'
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      # llvm-strip is universal: works on ELF (linux), Mach-O (darwin).
+      # `zip` is needed for the windows-msvc archive path.
+      - name: Install llvm + zip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm zip
+
+      - name: Cross-compile release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          # cargo-zigbuild accepts `cargo zigbuild --release ...` directly
+          # (zigbuild treats the absence of a subverb as `build`), but
+          # cargo-xwin requires the explicit `build` subverb before flags.
+          if [ "${{ matrix.tool }}" = "xwin" ]; then
+            soldr cargo xwin build --release --bin meta-hook --target "${{ matrix.target }}"
+          else
+            soldr cargo zigbuild --release --bin meta-hook --target "${{ matrix.target }}"
+          fi
 
       - name: Resolve version + paths
         id: vars
         shell: bash
         run: |
-          ref="${GITHUB_REF##*/}"
-          version="${ref#v}"
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            ref="${GITHUB_REF##*/}"
+            version="${ref#v}"
+          else
+            # workflow_dispatch (dry-run or manual republish from main):
+            # derive version from Cargo.toml so artifact naming stays sane.
+            version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+            [ -z "$version" ] && version="dryrun-${GITHUB_SHA::8}"
+          fi
           stem="meta-hook-v${version}-${{ matrix.target }}"
           bin="meta-hook"
           if [[ "${{ matrix.target }}" == *windows* ]]; then
@@ -136,22 +172,20 @@ jobs:
           echo "bin_name=$bin"      >> "$GITHUB_OUTPUT"
           echo "bin_path=target/${{ matrix.target }}/release/$bin" >> "$GITHUB_OUTPUT"
 
-      - name: Strip binary
-        if: ${{ matrix.strip }}
+      - name: Strip binary (Linux/macOS targets)
+        if: ${{ !contains(matrix.target, 'windows') }}
         shell: bash
         run: |
-          # Linux-cross strip lives under the target's binutils; macOS strip
-          # is just `strip`. Both are present on the GH runners we use.
-          if command -v "${{ matrix.target }}-strip" >/dev/null 2>&1; then
-            "${{ matrix.target }}-strip" "${{ steps.vars.outputs.bin_path }}"
-          else
-            strip "${{ steps.vars.outputs.bin_path }}"
-          fi
+          # llvm-strip handles every triple in the non-Windows lanes
+          # (ELF for linux, Mach-O for darwin). No per-arch strip tool
+          # needed when everything is cross-compiled from one host.
+          llvm-strip "${{ steps.vars.outputs.bin_path }}"
 
       - name: Stage artifact
         id: stage
         shell: bash
         run: |
+          set -euo pipefail
           stem="${{ steps.vars.outputs.stem }}"
           stage="dist/$stem"
           mkdir -p "$stage"
@@ -161,26 +195,13 @@ jobs:
           cd dist
           if [[ "${{ matrix.archive }}" == "zip" ]]; then
             archive="$stem.zip"
-            if command -v 7z >/dev/null 2>&1; then
-              7z a "$archive" "$stem" >/dev/null
-            else
-              powershell -Command "Compress-Archive -Path '$stem' -DestinationPath '$archive'"
-            fi
+            zip -r "$archive" "$stem" >/dev/null
           else
             archive="$stem.tar.gz"
             tar -czf "$archive" "$stem"
           fi
-          # SHA256 sidecar — sha256sum on Linux, shasum on macOS, certutil on Windows-bash.
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "$archive" > "$archive.sha256"
-          elif command -v shasum >/dev/null 2>&1; then
-            shasum -a 256 "$archive" > "$archive.sha256"
-          else
-            # Fallback: use python (present on all GH runners).
-            python -c "import hashlib,sys; p=sys.argv[1]; print(hashlib.sha256(open(p,'rb').read()).hexdigest()+'  '+p)" \
-              "$archive" > "$archive.sha256"
-          fi
-          echo "archive=dist/$archive"        >> "$GITHUB_OUTPUT"
+          sha256sum "$archive" > "$archive.sha256"
+          echo "archive=dist/$archive"         >> "$GITHUB_OUTPUT"
           echo "checksum=dist/$archive.sha256" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
@@ -196,6 +217,10 @@ jobs:
   publish:
     name: publish release
     needs: build
+    # Skip publish for dry-run dispatches. Push events (tag-driven)
+    # always publish; manual workflow_dispatch publishes only when
+    # dry-run is false.
+    if: github.event_name != 'workflow_dispatch' || !inputs.dry-run
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -209,9 +234,9 @@ jobs:
           tag="${GITHUB_REF##*/}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      # Hard-fail if a release already exists for this tag. Combined with
-      # the tag-protection ruleset (no force-update on `refs/tags/v*`),
-      # this enforces "tags + releases are write-once."
+      # Hard-fail if a release already exists for this tag. Combined
+      # with the tag-protection ruleset (no force-update on
+      # `refs/tags/v*`), this enforces "tags + releases are write-once."
       - name: Guard against republish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
