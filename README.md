@@ -83,7 +83,9 @@ CI via the [`zackees/setup-soldr`](https://github.com/zackees/setup-soldr)
 action.
 
 ```bash
-# One-time per clone: drops soldr into .venv/{bin,Scripts}/.
+# One-time per clone: uses the soldr already on PATH if present, otherwise
+# drops the latest soldr release into .venv/{bin,Scripts}/. Pin with
+# --version=X (or SOLDR_VERSION=X).
 ./install
 
 # Or, if you want it on PATH globally:
