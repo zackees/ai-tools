@@ -18,3 +18,7 @@ debug = "line-tables-only"
 split-debuginfo = "packed"
 strip = "none"
 lto = "thin"
+
+[workspace.lints.clippy]
+cognitive_complexity = "warn"
+too_many_lines = "warn"
