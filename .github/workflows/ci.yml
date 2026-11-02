@@ -1,36 +1,64 @@
-# Continuous integration: fmt / clippy / test on every push to every branch.
+# Continuous integration: fmt / clippy / test.
 #
-# Triggered on push only (no `pull_request`) to mirror clud's convention and
-# avoid double-runs when a feature branch is opened as a PR — the push event
-# already covers it.
+# Triggers:
+#   pull_request / merge_group -> fast lane (ubuntu-24.04 only). Keeps PRs
+#                                 and the merge queue cheap.
+#   push to main / nightly / dispatch -> full 6-OS matrix.
+#
+# `CI summary` is the single required status check. It runs with
+# `if: always()` and derives its verdict from the run attempt's full job
+# list via the GitHub API (ci/ci_summary.sh), never from `needs.*.result`,
+# so a matrix leg that is added, renamed, skipped-by-crash or cancelled
+# cannot silently change what is required to merge.
 #
 # Permissions are pinned to read at the workflow level. CI never writes to
-# the repo, the release pipeline lives in release.yml and uses its own
-# narrower scope.
+# the repo; the release pipeline lives in release.yml with its own scope.
 
 name: CI
 
 on:
   push:
+    branches: [main]
+  pull_request:
+  merge_group:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "merge_group" ]; then
+            echo 'matrix=["ubuntu-24.04"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'matrix=["ubuntu-24.04","ubuntu-24.04-arm","windows-2025","windows-11-arm","macos-15","macos-15-intel"]' >> "$GITHUB_OUTPUT"
+          fi
+
   ci:
     name: ${{ matrix.os }}
+    needs: plan
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-24.04
-          - ubuntu-24.04-arm
-          - windows-2025
-          - windows-11-arm
-          - macos-15
-          - macos-15-intel
+        os: ${{ fromJSON(needs.plan.outputs.matrix) }}
     env:
       RUST_BACKTRACE: "1"
       CARGO_TERM_COLOR: always
@@ -58,3 +86,24 @@ jobs:
 
       - name: cargo test
         run: soldr cargo test --all
+
+  summary:
+    name: CI summary
+    if: always()
+    needs: [plan, ci]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: ci/ci_summary.sh
+          sparse-checkout-cone-mode: false
+      - name: Aggregate job conclusions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SELF_JOB_NAME: CI summary
+        run: bash ci/ci_summary.sh
