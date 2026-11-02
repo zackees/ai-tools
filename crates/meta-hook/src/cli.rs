@@ -210,3 +210,4 @@ mod tests {
         assert!(!Mode::None.is_tool_mode());
     }
 }
+fn   badly_formatted( ){}
